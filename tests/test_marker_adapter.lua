@@ -8,7 +8,7 @@ local p={
     guid='{MARKER-1}',name='Footsteps',number=3,lane=0,position=2.084123},
     {guid='{MARKER-2}',name='City',number=6,lane=1,position=7.50789},
     {guid='{REGION-1}',name='Scene',number=1,lane=0,position=0,is_region=true}
-  }}
+  }
 }
 local calls={begin=0,finish=0,write=0,rename=0,update=0}
 local r={}
