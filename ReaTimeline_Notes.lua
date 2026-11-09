@@ -1533,6 +1533,102 @@ function M.note_insertion_slot(rects,mouse_y)
   return best_anchor,best_after,best_y
 end
 
+
+-- G2: dependency-injected marker/lane adapter (also available to Lua tests).
+-- All writes resolve native markers by GUID and verify the current lane first.
+function M.timeline_marker_adapter(api)
+  local A={}
+  local function project_str(p,k)
+    local ok,v=api.GetSetProjectInfo_String(p,k,'',false)
+    return ok and v or ''
+  end
+  local function marker_str(p,m,k)
+    local ok,v=api.GetSetRegionOrMarkerInfo_String(p,m,k,'',false)
+    return ok and v or ''
+  end
+  local function lane_guid(p,n) return project_str(p,'RULER_LANE_GUID:'..n) end
+  function A.read(p)
+    local groups,by_number,by_guid={}, {}, {}
+    local function group(n)
+      if by_number[n] then return by_number[n] end
+      local g={number=n,name=project_str(p,'RULER_LANE_NAME:'..n),
+        guid=lane_guid(p,n),markers={}}
+      groups[#groups+1]=g;by_number[n]=g;return g
+    end
+    local lane_count=math.max(0,math.floor(tonumber(api.GetSetProjectInfo(p,'RULER_LANE_COUNT',0,false)) or 0))
+    for n=0,lane_count-1 do group(n) end
+    local found=0
+    for n=0,math.max(0,math.floor(tonumber(api.GetNumRegionsOrMarkers(p)) or 0))-1 do
+      local obj=api.GetRegionOrMarker(p,n,'')
+      if obj and api.GetRegionOrMarkerInfo_Value(p,obj,'B_ISREGION')==0 then
+        local lane=math.floor(api.GetRegionOrMarkerInfo_Value(p,obj,'I_LANENUMBER'))
+        local m={guid=marker_str(p,obj,'GUID'),name=marker_str(p,obj,'P_NAME'),
+          position=api.GetRegionOrMarkerInfo_Value(p,obj,'D_STARTPOS'),
+          number=math.floor(api.GetRegionOrMarkerInfo_Value(p,obj,'I_NUMBER')),lane=lane}
+        local g=group(lane);g.markers[#g.markers+1]=m
+        if m.guid~='' then by_guid[m.guid]=m end
+        found=found+1
+      end
+    end
+    table.sort(groups,function(a,b)return a.number<b.number end)
+    for _,g in ipairs(groups) do
+      table.sort(g.markers,function(a,b)
+        if a.position~=b.position then return a.position<b.position end
+        if a.number~=b.number then return a.number<b.number end
+        return a.guid<b.guid
+      end)
+    end
+    return {project=p,lanes=groups,by_number=by_number,by_guid=by_guid,count=found}
+  end
+  local function find_lane(s,guid)
+    if type(guid)~='string' or guid=='' then return nil end
+    for _,g in ipairs(s.lanes) do if g.guid==guid then return g end end
+    return nil
+  end
+  function A.move(p,marker_guid,from_guid,to_guid)
+    if type(marker_guid)~='string' or marker_guid=='' then return false,'Missing marker GUID' end
+    if from_guid==to_guid then return false,'Cannot move to the same lane' end
+    local snapshot=A.read(p)
+    local from,to=find_lane(snapshot,from_guid),find_lane(snapshot,to_guid)
+    if not from or not to then return false,'Source or target lane is missing' end
+    local m=snapshot.by_guid[marker_guid]
+    if not m then return false,'Marker no longer exists' end
+    if m.lane~=from.number then return false,'Marker was moved in REAPER' end
+    local obj=api.GetRegionOrMarker(p,-1,marker_guid)
+    if not obj or marker_str(p,obj,'GUID')~=marker_guid
+      or api.GetRegionOrMarkerInfo_Value(p,obj,'B_ISREGION')~=0
+      or api.GetRegionOrMarkerInfo_Value(p,obj,'I_LANENUMBER')~=from.number then
+      return false,'Native marker changed before the operation'
+    end
+    api.Undo_BeginBlock2(p)
+    local ok,err=pcall(api.SetRegionOrMarkerInfo_Value,p,obj,'I_LANENUMBER',to.number)
+    api.Undo_EndBlock2(p,'ReaTimeline Notes: move marker between lanes',-1)
+    if not ok then return false,'Cannot change marker lane: '..tostring(err) end
+    obj=api.GetRegionOrMarker(p,-1,marker_guid)
+    if not obj or api.GetRegionOrMarkerInfo_Value(p,obj,'I_LANENUMBER')~=to.number then
+      return false,'Marker lane change could not be verified'
+    end
+    if api.UpdateTimeline then api.UpdateTimeline() end
+    return true
+  end
+  function A.rename(p,guid,name)
+    if type(name)~='string' or #name>256 then return false,'Invalid lane name' end
+    local lane=find_lane(A.read(p),guid)
+    if not lane then return false,'Lane no longer exists' end
+    if lane.name==name then return true end
+    local key='RULER_LANE_NAME:'..lane.number
+    api.Undo_BeginBlock2(p)
+    local ok,result=pcall(api.GetSetProjectInfo_String,p,key,name,true)
+    api.Undo_EndBlock2(p,'ReaTimeline Notes: rename ruler lane',-1)
+    if not ok or not result or project_str(p,key)~=name then
+      return false,'Lane name update could not be verified'
+    end
+    if api.UpdateTimeline then api.UpdateTimeline() end
+    return true
+  end
+  return A
+end
+
 if ... == '__test' then return M end
 
 if not reaper.ImGui_GetBuiltinPath then
