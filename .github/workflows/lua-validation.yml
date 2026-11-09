@@ -1,0 +1,17 @@
+name: Lua validation
+on:
+  push:
+    branches: [main, 'dev/**']
+  pull_request:
+    branches: [main]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lua 5.4
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4
+      - name: Lua syntax
+        run: luac5.4 -p ReaTimeline_Notes.lua && luac5.4 -p tests/test_marker_adapter.lua
+      - name: Marker adapter integration mock
+        run: lua5.4 tests/test_marker_adapter.lua
