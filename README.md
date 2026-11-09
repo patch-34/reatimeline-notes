@@ -4,7 +4,7 @@
 
 ReaTimeline Notes is a timeline-oriented fork of [ReaNotepad](https://github.com/patch-34/reanotepad) by Aleksei Vorobev / Patch34. It aims to connect REAPER marker ruler lanes to editable groups and provide marker↔note conversion, while retaining project, track, and media-item notes.
 
-**Development status:** G1 has been verified in REAPER 7.83 on macOS Intel and is available on `main`. Experimental G2 (branch `dev/g2-lane-sync`, v0.2.0-dev.1) adds native marker movement and lane renaming; REAPER testing is pending.
+**Development status:** G1 has been verified in REAPER 7.83 on macOS Intel and is available on `main`. Experimental G2 (branch `dev/g2-lane-sync`, v0.2.0-dev.2) adds native marker movement and lane renaming; REAPER testing is pending.
 
 ## Installation (development build)
 
@@ -51,7 +51,10 @@ Download [the G2 Lua file](https://github.com/patch-34/reatimeline-notes/blob/de
 2. Drag one marker onto the header of another lane's group in the ReaTimeline Notes window. Check the marker's actual lane in REAPER.
 3. Right-click a marker and choose a target lane. Check the same result.
 4. Right-click a lane heading in the script, change its name and save. Check the corresponding ruler lane name in REAPER.
-5. Use REAPER Undo/Redo after one move and one rename. The script should follow both changes.
-6. Verify that the marker GUID, number, name and full-precision position remain unchanged after moving lanes.
+5. With the **ReaTimeline Notes window focused**, press **Cmd+Z** (Ctrl+Z on Windows/Linux) after a marker move. **Cmd+Shift+Z** should redo it. The marker panel must be the active context; click on a marker/group first if you have been editing notes.
+6. Use the explicit **REAPER Undo** and **REAPER Redo** buttons in the marker panel (or the Edit menu). These act on the **entire REAPER project history**, not just marker edits.
+7. After editing a note, verify that Cmd+Z operates on the note editor's independent history. Click a marker row to return keyboard Undo/Redo to project history. Active text input retains its own Undo.
+8. With the REAPER arrange window focused, verify that native Undo/Redo still works as before.
+9. Verify that the marker GUID, number, name and full-precision position remain unchanged after moving lanes.
 
 This is a partial G2 milestone. Lane color editing, lane creation/deletion and tighter unified-note integration are not implemented in this experimental build.
