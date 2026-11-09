@@ -12,6 +12,8 @@ jobs:
       - name: Install Lua 5.4
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.4
       - name: Lua syntax
-        run: luac5.4 -p ReaTimeline_Notes.lua && luac5.4 -p tests/test_marker_adapter.lua
+        run: luac5.4 -p ReaTimeline_Notes.lua && luac5.4 -p tests/test_marker_adapter.lua && luac5.4 -p tests/test_history_routing.lua
       - name: Marker adapter integration mock
         run: lua5.4 tests/test_marker_adapter.lua
+      - name: History routing and REAPER Undo mock
+        run: lua5.4 tests/test_history_routing.lua
