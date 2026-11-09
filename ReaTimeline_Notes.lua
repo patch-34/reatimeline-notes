@@ -1,9 +1,10 @@
 -- @description ReaTimeline Notes (G2 lane synchronization)
--- @version 0.2.0-dev.2
+-- @version 0.2.0-dev.3
 -- @author Aleksei Vorobev / Patch34
 -- @link
 --   GitHub repository https://github.com/patch-34/reatimeline-notes
 -- @changelog
+--   G2.2: add native ruler lane creation, default colors and lane reordering.
 --   G2.1: route focused Cmd/Ctrl+Z to project history for markers, notes for notes.
 --   G2.1: add explicit REAPER Undo/Redo in the marker panel and Edit menu.
 --   G2: move markers between ruler lanes by GUID; add drag/drop and context menu.
@@ -44,7 +45,7 @@
 --                        https://cfillion.ca/reaper_imgui_doc.html
 
 local M = {}
-local VERSION = '0.2.0-dev.2'
+local VERSION = '0.2.0-dev.3'
 -- ============================================================================
 -- UI SETTINGS / НАСТРОЙКИ ИНТЕРФЕЙСА                        EDIT HERE
 -- ============================================================================
@@ -62,7 +63,8 @@ local UI_METRICS = {
   font_family='sans-serif', font_size=13, -- font_size is runtime-only
   column_heading_bold=true, tab_heading_extra_px=0, tab_arrow_extra_px=5,
   note_text_min_size=12, note_text_max_size=32, note_text_default_size=16,
-  timeline_marker_panel_height=205, timeline_marker_indent=12, -- G1
+  timeline_marker_panel_height=205, timeline_marker_indent=12, -- G2 ruler lanes
+  timeline_color_swatch_gap=6,
 
   -- Main window / Основное окно.
   window_initial_width=545, window_initial_height=615,
@@ -1557,7 +1559,9 @@ function M.timeline_marker_adapter(api)
     local function group(n)
       if by_number[n] then return by_number[n] end
       local g={number=n,name=project_str(p,'RULER_LANE_NAME:'..n),
-        guid=lane_guid(p,n),markers={}}
+        guid=lane_guid(p,n),
+        color=math.floor(tonumber(api.GetSetProjectInfo(p,'RULER_LANE_COLOR:'..n,0,false)) or 0),
+        markers={}}
       groups[#groups+1]=g;by_number[n]=g;return g
     end
     local lane_count=math.max(0,math.floor(tonumber(api.GetSetProjectInfo(p,'RULER_LANE_COUNT',0,false)) or 0))
@@ -1630,6 +1634,82 @@ function M.timeline_marker_adapter(api)
     api.Undo_EndBlock2(p,'ReaTimeline Notes: rename ruler lane',-1)
     if not ok or not result or project_str(p,key)~=name then
       return false,'Lane name update could not be verified'
+    end
+    if api.UpdateTimeline then api.UpdateTimeline() end
+    return true
+  end
+
+  -- G2.2: change the native default lane color; per-marker custom colors remain intact.
+  function A.set_color(p,lane_guid,native_color,expected_color)
+    if type(native_color)~='number' or native_color~=math.floor(native_color)
+        or native_color<0 or native_color>0x1ffffff then
+      return false,'Invalid lane color'
+    end
+    local lane=find_lane(A.read(p),lane_guid)
+    if not lane then return false,'Lane no longer exists' end
+    if expected_color~=nil and lane.color~=expected_color then
+      return false,'Lane color changed externally; reopen the menu'
+    end
+    if lane.color==native_color then return true end
+    local key='RULER_LANE_COLOR:'..lane.number
+    api.Undo_BeginBlock2(p)
+    local write_ok,err=pcall(api.GetSetProjectInfo,p,key,native_color,true)
+    api.Undo_EndBlock2(p,'ReaTimeline Notes: change ruler lane color',-1)
+    if not write_ok then return false,'Lane color update failed: '..tostring(err) end
+    local confirmed=math.floor(tonumber(api.GetSetProjectInfo(p,key,0,false)) or 0)
+    if confirmed~=native_color then return false,'Lane color update could not be verified' end
+    if api.UpdateTimeline then api.UpdateTimeline() end
+    return true
+  end
+
+  -- Insert a new native lane after all existing lanes. RULER_LANE_ORDER:-1
+  -- is the documented insertion operation; verify count and new GUID.
+  -- Do NOT retry automatically when REAPER reports an ambiguous result.
+  function A.create_lane(p)
+    local before=A.read(p)
+    local count=#before.lanes
+    if count>=64 then return false,'Too many ruler lanes' end
+    api.Undo_BeginBlock2(p)
+    local write_ok,err=pcall(api.GetSetProjectInfo,p,'RULER_LANE_ORDER:-1',count,true)
+    api.Undo_EndBlock2(p,'ReaTimeline Notes: add ruler lane',-1)
+    if not write_ok then return false,'Lane insertion failed: '..tostring(err) end
+    local after=A.read(p)
+    if #after.lanes~=count+1 then
+      return false,'Lane insertion could not be confirmed; inspect the ruler'
+    end
+    local previous={}
+    for _,lane in ipairs(before.lanes) do if lane.guid~='' then previous[lane.guid]=true end end
+    local created
+    for _,lane in ipairs(after.lanes) do
+      if lane.guid~='' and not previous[lane.guid] then
+        if created then return false,'Multiple new lanes detected; inspect the ruler' end
+        created=lane
+      end
+    end
+    if not created then return false,'New ruler lane GUID could not be verified' end
+    if api.UpdateTimeline then api.UpdateTimeline() end
+    return true,created.guid
+  end
+
+  -- Native lane order is a property of REAPER, not a UI-only permutation.
+  function A.move_lane(p,source_guid,to_index)
+    local before=A.read(p)
+    local lane=find_lane(before,source_guid)
+    if not lane then return false,'Lane no longer exists' end
+    if type(to_index)~='number' or to_index~=math.floor(to_index)
+        or to_index<0 or to_index>=#before.lanes then
+      return false,'Invalid lane position'
+    end
+    if lane.number==to_index then return true end
+    local key='RULER_LANE_ORDER:'..lane.number
+    api.Undo_BeginBlock2(p)
+    local write_ok,err=pcall(api.GetSetProjectInfo,p,key,to_index,true)
+    api.Undo_EndBlock2(p,'ReaTimeline Notes: reorder ruler lanes',-1)
+    if not write_ok then return false,'Lane reorder failed: '..tostring(err) end
+    local after=A.read(p)
+    local moved=find_lane(after,source_guid)
+    if not moved or moved.number~=to_index then
+      return false,'Lane order could not be verified'
     end
     if api.UpdateTimeline then api.UpdateTimeline() end
     return true
