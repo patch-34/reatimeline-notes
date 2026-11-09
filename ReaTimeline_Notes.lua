@@ -1665,9 +1665,10 @@ function M.timeline_marker_adapter(api)
   -- Insert a new native lane after all existing lanes. RULER_LANE_ORDER:-1
   -- is the documented insertion operation; verify count and new GUID.
   -- Do NOT retry automatically when REAPER reports an ambiguous result.
-  function A.create_lane(p)
+  function A.create_lane(p,expected_count)
     local before=A.read(p)
     local count=#before.lanes
+    if expected_count~=nil and count~=expected_count then return false,'Lane list changed externally' end
     if count>=64 then return false,'Too many ruler lanes' end
     api.Undo_BeginBlock2(p)
     local write_ok,err=pcall(api.GetSetProjectInfo,p,'RULER_LANE_ORDER:-1',count,true)
@@ -1692,9 +1693,12 @@ function M.timeline_marker_adapter(api)
   end
 
   -- Native lane order is a property of REAPER, not a UI-only permutation.
-  function A.move_lane(p,source_guid,to_index)
+  function A.move_lane(p,source_guid,to_index,expected_index)
     local before=A.read(p)
     local lane=find_lane(before,source_guid)
+    if lane and expected_index~=nil and lane.number~=expected_index then
+      return false,'Lane order changed externally; reopen the menu'
+    end
     if not lane then return false,'Lane no longer exists' end
     if type(to_index)~='number' or to_index~=math.floor(to_index)
         or to_index<0 or to_index>=#before.lanes then
@@ -5705,6 +5709,41 @@ local function timeline_drop_target(project,lane,pending)
   end
   ImGui.EndDragDropTarget(ctx)
 end
+
+local TIMELINE_LANE_COLORS={
+  {id='none',en='Default',ru='Без цвета',rgb=nil},
+  {id='red',en='Red',ru='Красный',rgb={192,82,82}},
+  {id='orange',en='Orange',ru='Оранжевый',rgb={199,136,58}},
+  {id='yellow',en='Yellow',ru='Жёлтый',rgb={196,176,54}},
+  {id='green',en='Green',ru='Зелёный',rgb={76,154,112}},
+  {id='blue',en='Blue',ru='Синий',rgb={80,137,195}},
+  {id='purple',en='Purple',ru='Фиолетовый',rgb={153,105,184}}
+}
+local function timeline_native_color(rgb)
+  if not rgb then return 0 end
+  return (reaper.ColorToNative(rgb[1],rgb[2],rgb[3])&0xffffff)|0x1000000
+end
+local function timeline_lane_color_rgba(native)
+  if not native or native&0x1000000==0 then return nil end
+  local red,green,blue=reaper.ColorFromNative(native&0xffffff)
+  return ((red&0xff)<<24)|((green&0xff)<<16)|((blue&0xff)<<8)|0xff
+end
+local function timeline_apply_lane_command(command)
+  if not command or command.project~=reaper.EnumProjects(-1,'') then return end
+  local project=command.project
+  local ok,err
+  if command.op=='create' then
+    ok,err=timeline_adapter.create_lane(project,command.expected_count)
+  elseif command.op=='color' then
+    ok,err=timeline_adapter.set_color(project,command.guid,command.color,command.old_color)
+  elseif command.op=='reorder' then
+    ok,err=timeline_adapter.move_lane(project,command.guid,command.destination,command.old_index)
+  else return end
+  timeline_error=ok and nil or err
+  history_target='markers'
+  timeline_update(project,true)
+end
+
 local function draw_marker_browser()
   local project=reaper.EnumProjects(-1,'')
   timeline_update(project)
@@ -5717,6 +5756,13 @@ local function draw_marker_browser()
   ImGui.SameLine(ctx)
   ImGui.TextDisabled(ctx,ru and 'перетащи маркер на заголовок группы' or
     'drag marker onto another group heading')
+  ImGui.SameLine(ctx)
+  if ImGui.Button(ctx,(ru and '+ Линия' or '+ Lane')..'###new_ruler_lane') then
+    pending.lane_command={op='create',project=project,
+      expected_count=data and #data.lanes or 0}
+  end
+  UI.item_tooltip(ru and 'Добавить линию на таймлайн REAPER' or
+    'Insert an actual REAPER ruler lane')
   if timeline_error then
     ImGui.TextWrapped(ctx,(ru and 'Ошибка маркера: ' or 'Marker error: ')..timeline_error)
   end
@@ -5743,9 +5789,12 @@ local function draw_marker_browser()
     if data then
       for _,lane in ipairs(data.lanes) do
         ImGui.PushID(ctx,lane.guid~='' and lane.guid or ('lane:'..lane.number))
+        local current_color=timeline_lane_color_rgba(lane.color)
+        if current_color then ImGui.PushStyleColor(ctx,ImGui.Col_Text,current_color) end
         local expanded=ImGui.TreeNodeEx(ctx,'lane',
           timeline_lane_title(lane,ru)..' ('..#lane.markers..')',
           ImGui.TreeNodeFlags_DefaultOpen)
+        if current_color then ImGui.PopStyleColor(ctx) end
         local header_hovered=ImGui.IsItemHovered(ctx)
         -- Native target belongs to the header even when the group is collapsed.
         timeline_drop_target(project,lane,pending)
@@ -5769,6 +5818,31 @@ local function draw_marker_browser()
                 original=timeline_lane_edit.original}
               ImGui.CloseCurrentPopup(ctx)
             end
+            ImGui.Separator(ctx)
+            if ImGui.BeginMenu(ctx,ru and 'Цвет линии' or 'Lane color') then
+              for _,option in ipairs(TIMELINE_LANE_COLORS) do
+                local native=timeline_native_color(option.rgb)
+                if ImGui.MenuItem(ctx,ru and option.ru or option.en,
+                  nil,lane.color==native) then
+                  pending.lane_command={op='color',project=project,
+                    guid=lane.guid,color=native,old_color=lane.color}
+                end
+              end
+              ImGui.EndMenu(ctx)
+            end
+            if ImGui.MenuItem(ctx,ru and 'Поднять линию' or 'Move lane up',
+              nil,lane.number>0) then
+              pending.lane_command={op='reorder',project=project,
+                guid=lane.guid,old_index=lane.number,destination=lane.number-1}
+            end
+            if ImGui.MenuItem(ctx,ru and 'Опустить линию' or 'Move lane down',
+              nil,data and lane.number<#data.lanes-1) then
+              pending.lane_command={op='reorder',project=project,
+                guid=lane.guid,old_index=lane.number,destination=lane.number+1}
+            end
+            ImGui.Separator(ctx)
+            ImGui.TextDisabled(ctx,ru and 'Удаление — на этапе G2.3' or
+              'Deletion deferred to G2.3')
           else
             ImGui.TextDisabled(ctx,ru and 'Линия без GUID' or 'Lane has no GUID')
           end
@@ -5828,6 +5902,7 @@ local function draw_marker_browser()
   -- Mutations happen after rendering: never invalidate lane arrays mid-loop.
   if pending.rename then timeline_apply_rename(pending.rename) end
   if pending.move then timeline_apply_move(pending.move) end
+  if pending.lane_command then timeline_apply_lane_command(pending.lane_command) end
   if not ImGui.IsMouseDown(ctx,0) and not ImGui.IsMouseReleased(ctx,0) then
     timeline_drag=nil
   end
