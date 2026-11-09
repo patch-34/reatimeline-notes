@@ -1,9 +1,11 @@
 -- @description ReaTimeline Notes (G2 lane synchronization)
--- @version 0.2.0-dev.1
+-- @version 0.2.0-dev.2
 -- @author Aleksei Vorobev / Patch34
 -- @link
 --   GitHub repository https://github.com/patch-34/reatimeline-notes
 -- @changelog
+--   G2.1: route focused Cmd/Ctrl+Z to project history for markers, notes for notes.
+--   G2.1: add explicit REAPER Undo/Redo in the marker panel and Edit menu.
 --   G2: move markers between ruler lanes by GUID; add drag/drop and context menu.
 --   G2: rename native ruler lanes and observe external changes.
 --   Fork ReaNotepad 0.6.2 into experimental ReaTimeline Notes.
@@ -42,7 +44,7 @@
 --                        https://cfillion.ca/reaper_imgui_doc.html
 
 local M = {}
-local VERSION = '0.2.0-dev.1'
+local VERSION = '0.2.0-dev.2'
 -- ============================================================================
 -- UI SETTINGS / НАСТРОЙКИ ИНТЕРФЕЙСА                        EDIT HERE
 -- ============================================================================
@@ -1635,6 +1637,32 @@ function M.timeline_marker_adapter(api)
   return A
 end
 
+
+-- Two independent history stores: REAPER project and ReaNotepad owner.
+-- The caller must choose one explicitly; never silently undo the other.
+function M.project_history_adapter(api)
+  local A={}
+  function A.caption(project,direction)
+    if not project then return nil end
+    local fun=direction<0 and api.Undo_CanUndo2 or api.Undo_CanRedo2
+    local title=fun(project)
+    return type(title)=='string' and title~='' and title or nil
+  end
+  function A.step(project,direction)
+    if not A.caption(project,direction) then return false,'No REAPER project history entry' end
+    local fun=direction<0 and api.Undo_DoUndo2 or api.Undo_DoRedo2
+    local status=fun(project)
+    return status~=nil and status~=false and status~=0,
+      status==0 and 'REAPER did not apply the history entry' or nil
+  end
+  return A
+end
+function M.history_route(target,blocked,notes_available,project_available)
+  if blocked then return nil end
+  if target=='markers' then return project_available and 'project' or nil end
+  return notes_available and 'notes' or nil
+end
+
 if ... == '__test' then return M end
 
 if not reaper.ImGui_GetBuiltinPath then
@@ -1659,6 +1687,8 @@ local SESSION_CHECKS_PER_FRAME=8
 local REPOSITORY_URL='https://github.com/patch-34/reatimeline-notes'
 local epoch, changed, undo_boundary, force_tab = 0, false, false, nil
 local edit_key, edit_action, history_request
+local history_target='markers' -- context of last interaction, never a merged history
+local project_history_request
 local tab_rename, escape_pressed = nil, false
 local bulk_selection
 local UI
@@ -1839,6 +1869,7 @@ if not themes[theme] then theme='paper' end
 local function pref(key,value) reaper.SetExtState(PREF,key,tostring(value),true) end
 local function label(s) return (s:gsub('##','#\226\128\139#')) end
 local function touch(key,action)
+  history_target='notes'
   if not changed then edit_key=key elseif edit_key~=key then edit_key=nil end
   if not changed then edit_action=action or 'change' elseif edit_action~=action then edit_action='change' end
   changed=true
@@ -3702,14 +3733,27 @@ local function can_history(direction)
       or (session.error and not (session.history_readonly and not session.doc)) or session.conflict or modal or tab_rename or UI.info then return false end
   return #(direction<0 and session.history.undo or session.history.redo)>0
 end
+local project_history=M.project_history_adapter(reaper)
 local function history_shortcuts()
-  if not session or modal or tab_rename or UI.info or UI.note_edit or (session.error and not (session.history_readonly and not session.doc)) or session.conflict then return end
+  if modal or tab_rename or UI.info or UI.note_edit then return end
   if not ImGui.IsWindowFocused(ctx,ImGui.FocusedFlags_RootAndChildWindows) then return end
-  -- NoUndoRedo on document inputs prevents both histories firing for one chord.
-  -- Mod_Ctrl maps to Cmd under ReaImGui's native macOS behavior.
-  if ImGui.IsKeyChordPressed(ctx,ImGui.Mod_Ctrl|ImGui.Key_Z) and can_history(-1) then history_request=-1
-  elseif (ImGui.IsKeyChordPressed(ctx,ImGui.Mod_Ctrl|ImGui.Mod_Shift|ImGui.Key_Z)
-      or ImGui.IsKeyChordPressed(ctx,ImGui.Mod_Ctrl|ImGui.Key_Y)) and can_history(1) then history_request=1 end
+  -- Text input and popup widgets own their local Undo. Never steal it.
+  if ImGui.IsAnyItemActive(ctx) or ImGui.IsPopupOpen(ctx,'',
+      ImGui.PopupFlags_AnyPopupId|ImGui.PopupFlags_AnyPopupLevel) then return end
+  -- macOS Mod_Ctrl corresponds to Cmd in ReaImGui.
+  local direction
+  if ImGui.Shortcut(ctx,ImGui.Mod_Ctrl|ImGui.Key_Z,
+      ImGui.InputFlags_RouteFromRootWindow) then direction=-1
+  elseif ImGui.Shortcut(ctx,ImGui.Mod_Ctrl|ImGui.Mod_Shift|ImGui.Key_Z,
+      ImGui.InputFlags_RouteFromRootWindow)
+      or ImGui.Shortcut(ctx,ImGui.Mod_Ctrl|ImGui.Key_Y,
+        ImGui.InputFlags_RouteFromRootWindow) then direction=1 end
+  if not direction then return end
+  local project=reaper.EnumProjects(-1,'')
+  local target=M.history_route(history_target,false,can_history(direction),
+    project_history.caption(project,direction)~=nil)
+  if target=='project' then project_history_request=direction
+  elseif target=='notes' then history_request=direction end
 end
 local HISTORY_ACTIONS = {
   color_marker={'color marker','цветовую метку'},delete_selected={'delete selected elements','удаление выделенных элементов'},
@@ -3765,6 +3809,19 @@ local function menu_bar()
     local history_width=math.max(ImGui.CalcTextSize(ctx,UI.history_caption(-1)),(ImGui.CalcTextSize(ctx,UI.history_caption(1))))
     if UI.history_item(-1,history_width) then history_request=-1 end
     if UI.history_item(1,history_width) then history_request=1 end
+    ImGui.Separator(ctx)
+    -- REAPER history is deliberately separate from owner-scoped notes history.
+    local proj=reaper.EnumProjects(-1,'')
+    for _,direction in ipairs({-1,1}) do
+      local caption=project_history.caption(proj,direction)
+      local label_text=direction<0 and 'REAPER Undo' or 'REAPER Redo'
+      if caption then label_text=label_text..': '..caption end
+      if ImGui.MenuItem(ctx,label_text..'###project_history_'..direction,nil,false,
+          caption~=nil) then
+        history_target='markers'
+        project_history_request=direction
+      end
+    end
     ImGui.EndPopup(ctx)
   end
   if UI.begin_menu('Tabs',enabled) then
@@ -5133,6 +5190,9 @@ local function draw_document()
       UI.note_drag_scroll()
       ImGui.Unindent(ctx,UI_METRICS.inner_gap)
       UI.overlay_scroll_thumb(board)
+      if ImGui.IsWindowHovered(ctx) and ImGui.IsMouseReleased(ctx,0) then
+        history_target='notes'
+      end
       ImGui.EndChild(ctx) -- page_body
     end
     ImGui.PopID(ctx)
@@ -5532,12 +5592,14 @@ local function timeline_apply_move(request)
   local ok,err=timeline_adapter.move(request.project,request.marker_guid,
     request.source_guid,request.dest_guid)
   timeline_error=ok and nil or err
+  history_target='markers'
   timeline_update(request.project,true)
 end
 local function timeline_apply_rename(request)
   if not request or request.project~=reaper.EnumProjects(-1,'') then return end
   local ok,err=timeline_adapter.rename(request.project,request.guid,request.name,request.original)
   timeline_error=ok and nil or err
+  history_target='markers'
   timeline_update(request.project,true)
 end
 local function timeline_drop_target(project,lane,pending)
@@ -5569,6 +5631,21 @@ local function draw_marker_browser()
     'drag marker onto another group heading')
   if timeline_error then
     ImGui.TextWrapped(ctx,(ru and 'Ошибка маркера: ' or 'Marker error: ')..timeline_error)
+  end
+  -- Explicit actions also work when notes retain their own Undo shortcuts.
+  for _,direction in ipairs({-1,1}) do
+    local caption=project_history.caption(project,direction)
+    if direction==1 then ImGui.SameLine(ctx) end
+    ImGui.BeginDisabled(ctx,caption==nil)
+    if ImGui.Button(ctx,(direction<0 and
+        (ru and 'Отменить в REAPER' or 'REAPER Undo') or
+        (ru and 'Повторить в REAPER' or 'REAPER Redo'))..
+        '###project_history_button_'..direction) then
+      history_target='markers'
+      project_history_request=direction
+    end
+    ImGui.EndDisabled(ctx)
+    UI.item_tooltip(caption or (ru and 'Нет доступного действия' or 'No action available'))
   end
   if ImGui.BeginChild(ctx,'timeline_markers',0,UI_METRICS.timeline_marker_panel_height,
       ImGui.ChildFlags_Borders) then
@@ -5655,6 +5732,10 @@ local function draw_marker_browser()
       end
     end
   end
+  if ImGui.IsWindowHovered(ctx) and
+      (ImGui.IsMouseReleased(ctx,0) or ImGui.IsMouseReleased(ctx,1)) then
+    history_target='markers'
+  end
   ImGui.EndChild(ctx)
   -- Mutations happen after rendering: never invalidate lane arrays mid-loop.
   if pending.rename then timeline_apply_rename(pending.rename) end
@@ -5666,7 +5747,7 @@ end
 
 local function frame()
   frame_checkpoint=nil
-  changed=false; undo_boundary=false; edit_key=nil; edit_action=nil; history_request=nil
+  changed=false; undo_boundary=false; edit_key=nil; edit_action=nil; history_request=nil; project_history_request=nil
   if not sync_project() then return false end
   if bulk_selection and (bulk_selection.owner~=session or not session or not session.doc or session.error or session.conflict) then bulk_selection=nil end
   if bulk_selection then
@@ -5748,6 +5829,14 @@ local function frame()
     end
     header_context()
     draw_marker_browser()
+    if project_history_request then
+      local direction=project_history_request
+      project_history_request=nil
+      local active_project=reaper.EnumProjects(-1,'')
+      local ok,err=project_history.step(active_project,direction)
+      timeline_error=ok and nil or err
+      timeline_update(active_project,true)
+    end
     if switching then UI.place=nil else UI.creation_toolbar() end
     if switching then ImGui.TextDisabled(ctx,tr('Switching note owner...'))
     elseif not session then ImGui.TextWrapped(ctx,UI.message(selection_message or 'Select an object in REAPER.'))
