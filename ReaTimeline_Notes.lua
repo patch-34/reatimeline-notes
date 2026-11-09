@@ -1614,10 +1614,13 @@ function M.timeline_marker_adapter(api)
     if api.UpdateTimeline then api.UpdateTimeline() end
     return true
   end
-  function A.rename(p,guid,name)
+  function A.rename(p,guid,name,expected_name)
     if type(name)~='string' or #name>256 then return false,'Invalid lane name' end
     local lane=find_lane(A.read(p),guid)
     if not lane then return false,'Lane no longer exists' end
+    if expected_name~=nil and lane.name~=expected_name then
+      return false,'Lane was renamed externally; reopen the editor'
+    end
     if lane.name==name then return true end
     local key='RULER_LANE_NAME:'..lane.number
     api.Undo_BeginBlock2(p)
@@ -5533,7 +5536,7 @@ local function timeline_apply_move(request)
 end
 local function timeline_apply_rename(request)
   if not request or request.project~=reaper.EnumProjects(-1,'') then return end
-  local ok,err=timeline_adapter.rename(request.project,request.guid,request.name)
+  local ok,err=timeline_adapter.rename(request.project,request.guid,request.name,request.original)
   timeline_error=ok and nil or err
   timeline_update(request.project,true)
 end
@@ -5582,14 +5585,14 @@ local function draw_marker_browser()
         -- Native target belongs to the header even when the group is collapsed.
         timeline_drop_target(project,lane,pending)
         if header_hovered and ImGui.IsMouseReleased(ctx,1) then
-          timeline_lane_edit={project=project,guid=lane.guid,value=lane.name}
+          timeline_lane_edit={project=project,guid=lane.guid,value=lane.name,original=lane.name}
           ImGui.OpenPopup(ctx,'lane_actions')
         end
         if ImGui.BeginPopup(ctx,'lane_actions') then
           if lane.guid~='' then
             if not timeline_lane_edit or timeline_lane_edit.project~=project
                 or timeline_lane_edit.guid~=lane.guid then
-              timeline_lane_edit={project=project,guid=lane.guid,value=lane.name}
+              timeline_lane_edit={project=project,guid=lane.guid,value=lane.name,original=lane.name}
             end
             ImGui.Text(ctx,ru and 'Название линии' or 'Lane name')
             ImGui.SetNextItemWidth(ctx,230)
@@ -5597,7 +5600,8 @@ local function draw_marker_browser()
               ImGui.InputTextFlags_EnterReturnsTrue)
             timeline_lane_edit.value=value
             if enter or ImGui.Button(ctx,ru and 'Сохранить' or 'Save') then
-              pending.rename={project=project,guid=lane.guid,name=timeline_lane_edit.value}
+              pending.rename={project=project,guid=lane.guid,name=timeline_lane_edit.value,
+                original=timeline_lane_edit.original}
               ImGui.CloseCurrentPopup(ctx)
             end
           else
