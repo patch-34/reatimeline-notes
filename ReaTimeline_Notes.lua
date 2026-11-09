@@ -1,9 +1,11 @@
--- @description ReaTimeline Notes (G1 timeline marker browser)
--- @version 0.1.0-dev.1
+-- @description ReaTimeline Notes (G2 lane synchronization)
+-- @version 0.2.0-dev.1
 -- @author Aleksei Vorobev / Patch34
 -- @link
 --   GitHub repository https://github.com/patch-34/reatimeline-notes
 -- @changelog
+--   G2: move markers between ruler lanes by GUID; add drag/drop and context menu.
+--   G2: rename native ruler lanes and observe external changes.
 --   Fork ReaNotepad 0.6.2 into experimental ReaTimeline Notes.
 --   Display native markers live, grouped by their actual ruler lane.
 --   Keep all existing note editors; isolate UI prefs and recovery.
@@ -11,7 +13,8 @@
 --   Apply Undo/Redo before drawing notes to prevent one-frame flicker.
 --   Correct tab creation history labels and remove obsolete UI strings.
 -- @about
---   G1 experimental fork. Read-only ruler-lane marker browser.
+--   G2 experimental build: drag markers onto another lane heading.
+--   Right-click markers to move, right-click lane headings to rename.
 --   Notes still use the existing owner selector until unified-list G3.
 --   Native note storage is shared with ReaNotepad: avoid concurrent edits.
 --   Structured notes for REAPER projects, tracks and media items.
@@ -39,7 +42,7 @@
 --                        https://cfillion.ca/reaper_imgui_doc.html
 
 local M = {}
-local VERSION = '0.1.0-dev.1'
+local VERSION = '0.2.0-dev.1'
 -- ============================================================================
 -- UI SETTINGS / НАСТРОЙКИ ИНТЕРФЕЙСА                        EDIT HERE
 -- ============================================================================
@@ -5496,17 +5499,12 @@ local function apply_history_request(before)
 end
 
 
--- G1 native marker/lane adapter. Read-only: no mutation of markers or lanes.
+
+-- G2: native DragDrop + context menu over live REAPER lane groups.
 local TIMELINE_POLL_INTERVAL=0.25
+local timeline_adapter=M.timeline_marker_adapter(reaper)
 local timeline_snapshot,timeline_polled_at=nil,-math.huge
-local function timeline_read_project_string(proj,key)
-  local ok,val=reaper.GetSetProjectInfo_String(proj,key,'',false)
-  return ok and type(val)=='string' and val or ''
-end
-local function timeline_read_marker_string(proj,marker,key)
-  local ok,val=reaper.GetSetRegionOrMarkerInfo_String(proj,marker,key,'',false)
-  return ok and type(val)=='string' and val or ''
-end
+local timeline_drag,timeline_lane_edit,timeline_error
 local function timeline_milliseconds(t)
   local sign=t<0 and '-' or ''
   local ms=math.floor(math.abs(t)*1000+0.5)
@@ -5514,76 +5512,100 @@ local function timeline_milliseconds(t)
     sign,math.floor(ms/3600000),math.floor(ms/60000)%60,
     math.floor(ms/1000)%60,ms%1000)
 end
-local function timeline_read_markers(proj)
-  local lanes,by_number={},{}
-  local function ensure_lane(n,is_missing)
-    if by_number[n] then return by_number[n] end
-    local lane={number=n,
-      name=is_missing and '' or timeline_read_project_string(proj,'RULER_LANE_NAME:'..n),
-      guid=is_missing and '' or timeline_read_project_string(proj,'RULER_LANE_GUID:'..n),
-      markers={}}
-    by_number[n]=lane; lanes[#lanes+1]=lane
-    return lane
-  end
-  local lane_count=math.max(0,math.floor(tonumber(
-    reaper.GetSetProjectInfo(proj,'RULER_LANE_COUNT',0,false)) or 0))
-  for n=0,lane_count-1 do ensure_lane(n,false) end
-  local found=0
-  local count=math.max(0,math.floor(tonumber(reaper.GetNumRegionsOrMarkers(proj)) or 0))
-  for index=0,count-1 do
-    local marker=reaper.GetRegionOrMarker(proj,index,'')
-    if marker and tonumber(reaper.GetRegionOrMarkerInfo_Value(proj,marker,'B_ISREGION'))==0 then
-      local n=math.floor(tonumber(reaper.GetRegionOrMarkerInfo_Value(proj,marker,'I_LANENUMBER')) or 0)
-      local number=math.floor(tonumber(reaper.GetRegionOrMarkerInfo_Value(proj,marker,'I_NUMBER')) or 0)
-      local t=tonumber(reaper.GetRegionOrMarkerInfo_Value(proj,marker,'D_STARTPOS')) or 0
-      local lane=ensure_lane(n,true)
-      lane.markers[#lane.markers+1]={
-        guid=timeline_read_marker_string(proj,marker,'GUID'),
-        name=timeline_read_marker_string(proj,marker,'P_NAME'),
-        number=number,position=t
-      }
-      found=found+1
-    end
-  end
-  table.sort(lanes,function(a,b)return a.number<b.number end)
-  for _,lane in ipairs(lanes) do
-    table.sort(lane.markers,function(a,b)
-      if a.position~=b.position then return a.position<b.position end
-      if a.number~=b.number then return a.number<b.number end
-      return a.guid<b.guid
-    end)
-  end
-  return {project=proj,lanes=lanes,count=found}
-end
-local function timeline_update(proj)
-  if not proj then timeline_snapshot=nil;return end
+local function timeline_update(proj,force)
+  if not proj then timeline_snapshot=nil;timeline_drag=nil;return end
   local now=reaper.time_precise()
-  if timeline_snapshot and timeline_snapshot.project==proj
+  if not force and timeline_snapshot and timeline_snapshot.project==proj
     and now-timeline_polled_at<TIMELINE_POLL_INTERVAL then return end
-  timeline_snapshot=timeline_read_markers(proj)
+  timeline_snapshot=timeline_adapter.read(proj)
   timeline_polled_at=now
 end
+local function timeline_lane_title(lane,ru)
+  if lane.name~='' then return lane.name end
+  return (ru and 'Линия маркеров ' or 'Marker lane ')..(lane.number+1)
+end
+local function timeline_apply_move(request)
+  if not request or request.project~=reaper.EnumProjects(-1,'') then return end
+  local ok,err=timeline_adapter.move(request.project,request.marker_guid,
+    request.source_guid,request.dest_guid)
+  timeline_error=ok and nil or err
+  timeline_update(request.project,true)
+end
+local function timeline_apply_rename(request)
+  if not request or request.project~=reaper.EnumProjects(-1,'') then return end
+  local ok,err=timeline_adapter.rename(request.project,request.guid,request.name)
+  timeline_error=ok and nil or err
+  timeline_update(request.project,true)
+end
+local function timeline_drop_target(project,lane,pending)
+  if not ImGui.BeginDragDropTarget(ctx) then return end
+  local flags=ImGui.DragDropFlags_AcceptBeforeDelivery|
+    ImGui.DragDropFlags_AcceptNoDrawDefaultRect
+  local accepted,token=ImGui.AcceptDragDropPayload(ctx,'RTN_MARKER',nil,flags)
+  local active,kind,payload,_,delivery=ImGui.GetDragDropPayload(ctx)
+  local drag=timeline_drag
+  if accepted and active and delivery and kind=='RTN_MARKER' and drag
+    and token==drag.guid and payload==drag.guid and drag.project==project
+    and drag.source_guid~=lane.guid and lane.guid~='' then
+    pending.move={project=project,marker_guid=drag.guid,
+      source_guid=drag.source_guid,dest_guid=lane.guid}
+  end
+  ImGui.EndDragDropTarget(ctx)
+end
 local function draw_marker_browser()
-  timeline_update(reaper.EnumProjects(-1,''))
+  local project=reaper.EnumProjects(-1,'')
+  timeline_update(project)
   local ru=language=='ru'
   local data=timeline_snapshot
+  local pending={}
   ImGui.Separator(ctx)
   ImGui.Text(ctx,(ru and 'Линии маркеров (' or 'Marker lanes (')..
     (data and data.count or 0)..')')
   ImGui.SameLine(ctx)
-  ImGui.TextDisabled(ctx,ru and 'только просмотр · G1' or 'read only · G1')
-  if ImGui.BeginChild(ctx,'timeline_markers_readonly',0,UI_METRICS.timeline_marker_panel_height,
+  ImGui.TextDisabled(ctx,ru and 'перетащи маркер на заголовок группы' or
+    'drag marker onto another group heading')
+  if timeline_error then
+    ImGui.TextWrapped(ctx,(ru and 'Ошибка маркера: ' or 'Marker error: ')..timeline_error)
+  end
+  if ImGui.BeginChild(ctx,'timeline_markers',0,UI_METRICS.timeline_marker_panel_height,
       ImGui.ChildFlags_Borders) then
     if not data or #data.lanes==0 then
       ImGui.TextDisabled(ctx,ru and 'Линии маркеров не найдены' or 'No marker lanes')
     end
     if data then
       for _,lane in ipairs(data.lanes) do
-        local lane_title=lane.name~='' and lane.name or
-          ((ru and 'Линия маркеров ' or 'Marker lane ')..(lane.number+1))
-        ImGui.PushID(ctx,'timeline_lane:'..lane.number)
-        if ImGui.TreeNodeEx(ctx,'lane',lane_title..' ('..#lane.markers..')',
-          ImGui.TreeNodeFlags_DefaultOpen) then
+        ImGui.PushID(ctx,lane.guid~='' and lane.guid or ('lane:'..lane.number))
+        local expanded=ImGui.TreeNodeEx(ctx,'lane',
+          timeline_lane_title(lane,ru)..' ('..#lane.markers..')',
+          ImGui.TreeNodeFlags_DefaultOpen)
+        local header_hovered=ImGui.IsItemHovered(ctx)
+        -- Native target belongs to the header even when the group is collapsed.
+        timeline_drop_target(project,lane,pending)
+        if header_hovered and ImGui.IsMouseReleased(ctx,1) then
+          timeline_lane_edit={project=project,guid=lane.guid,value=lane.name}
+          ImGui.OpenPopup(ctx,'lane_actions')
+        end
+        if ImGui.BeginPopup(ctx,'lane_actions') then
+          if lane.guid~='' then
+            if not timeline_lane_edit or timeline_lane_edit.project~=project
+                or timeline_lane_edit.guid~=lane.guid then
+              timeline_lane_edit={project=project,guid=lane.guid,value=lane.name}
+            end
+            ImGui.Text(ctx,ru and 'Название линии' or 'Lane name')
+            ImGui.SetNextItemWidth(ctx,230)
+            local enter,value=ImGui.InputText(ctx,'##lane_name',timeline_lane_edit.value,
+              ImGui.InputTextFlags_EnterReturnsTrue)
+            timeline_lane_edit.value=value
+            if enter or ImGui.Button(ctx,ru and 'Сохранить' or 'Save') then
+              pending.rename={project=project,guid=lane.guid,name=timeline_lane_edit.value}
+              ImGui.CloseCurrentPopup(ctx)
+            end
+          else
+            ImGui.TextDisabled(ctx,ru and 'Линия без GUID' or 'Lane has no GUID')
+          end
+          ImGui.EndPopup(ctx)
+        end
+        if expanded then
           if #lane.markers==0 then
             ImGui.TextDisabled(ctx,ru and 'Нет маркеров' or 'No markers')
           else
@@ -5591,11 +5613,34 @@ local function draw_marker_browser()
             for _,marker in ipairs(lane.markers) do
               ImGui.PushID(ctx,marker.guid~='' and marker.guid or
                 ('marker:'..marker.number..':'..marker.position))
-              ImGui.TextDisabled(ctx,timeline_milliseconds(marker.position))
-              ImGui.SameLine(ctx)
               local name=marker.name~='' and marker.name or
                 ((ru and 'Маркер #' or 'Marker #')..marker.number)
-              ImGui.TextWrapped(ctx,(name:gsub('[\r\n]',' ')))
+              local caption=timeline_milliseconds(marker.position)..'   '..
+                (name:gsub('[\r\n]',' '))
+              ImGui.Selectable(ctx,caption..'###marker_row',false)
+              local row_hovered=ImGui.IsItemHovered(ctx)
+              if marker.guid~='' and lane.guid~='' and
+                ImGui.BeginDragDropSource(ctx,0) then
+                timeline_drag={project=project,guid=marker.guid,source_guid=lane.guid}
+                ImGui.SetDragDropPayload(ctx,'RTN_MARKER',marker.guid,ImGui.Cond_Once)
+                ImGui.Text(ctx,caption)
+                ImGui.EndDragDropSource(ctx)
+              end
+              if row_hovered and ImGui.IsMouseReleased(ctx,1) then
+                ImGui.OpenPopup(ctx,'marker_move')
+              end
+              if ImGui.BeginPopup(ctx,'marker_move') then
+                ImGui.Text(ctx,ru and 'Перенести на линию' or 'Move to lane')
+                for _,destination in ipairs(data.lanes) do
+                  if ImGui.MenuItem(ctx,timeline_lane_title(destination,ru),
+                    nil,destination.guid~='' and destination.guid~=lane.guid
+                      and marker.guid~='') then
+                    pending.move={project=project,marker_guid=marker.guid,
+                      source_guid=lane.guid,dest_guid=destination.guid}
+                  end
+                end
+                ImGui.EndPopup(ctx)
+              end
               ImGui.PopID(ctx)
             end
             ImGui.Unindent(ctx,UI_METRICS.timeline_marker_indent)
@@ -5607,6 +5652,12 @@ local function draw_marker_browser()
     end
   end
   ImGui.EndChild(ctx)
+  -- Mutations happen after rendering: never invalidate lane arrays mid-loop.
+  if pending.rename then timeline_apply_rename(pending.rename) end
+  if pending.move then timeline_apply_move(pending.move) end
+  if not ImGui.IsMouseDown(ctx,0) and not ImGui.IsMouseReleased(ctx,0) then
+    timeline_drag=nil
+  end
 end
 
 local function frame()
