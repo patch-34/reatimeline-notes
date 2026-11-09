@@ -3811,8 +3811,12 @@ local function menu_bar()
     local history_width=math.max(ImGui.CalcTextSize(ctx,UI.history_caption(-1)),
       ImGui.CalcTextSize(ctx,UI.history_caption(1)))+
       ImGui.CalcTextSize(ctx,language=='ru' and 'Заметки: ' or 'Notes: ')
-    if UI.history_item(-1,history_width) then history_request=-1 end
-    if UI.history_item(1,history_width) then history_request=1 end
+    if UI.history_item(-1,history_width) then
+      history_target='notes';history_request=-1
+    end
+    if UI.history_item(1,history_width) then
+      history_target='notes';history_request=1
+    end
     ImGui.Separator(ctx)
     -- REAPER history is deliberately separate from owner-scoped notes history.
     local proj=reaper.EnumProjects(-1,'')
