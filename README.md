@@ -4,7 +4,7 @@
 
 ReaTimeline Notes is a timeline-oriented fork of [ReaNotepad](https://github.com/patch-34/reanotepad) by Aleksei Vorobev / Patch34. It aims to connect REAPER marker ruler lanes to editable groups and provide marker↔note conversion, while retaining project, track, and media-item notes.
 
-**Development status:** G1 has been verified in REAPER 7.83 on macOS Intel and is available on `main`. Experimental G2 (branch `dev/g2-lane-sync`, v0.2.0-dev.2) adds native marker movement and lane renaming; REAPER testing is pending.
+**Development status:** G1 has been verified in REAPER 7.83 on macOS Intel and is available on `main`. G2.1 (v0.2.0-dev.2) is accepted in REAPER 7.83/OSX64, including focused-window Undo/Redo. G2.2 experimental v0.2.0-dev.3 is in branch `dev/g2-lane-controls`; native lane insert/color/order operations need REAPER validation.
 
 ## Installation (development build)
 
@@ -58,3 +58,17 @@ Download [the G2 Lua file](https://github.com/patch-34/reatimeline-notes/blob/de
 9. Verify that the marker GUID, number, name and full-precision position remain unchanged after moving lanes.
 
 This is a partial G2 milestone. Lane color editing, lane creation/deletion and tighter unified-note integration are not implemented in this experimental build.
+
+## G2.2 lane controls (experimental)
+
+Use the [G2.2 development Lua](https://github.com/patch-34/reatimeline-notes/blob/dev/g2-lane-controls/ReaTimeline_Notes.lua) in **a disposable copy of the project**.
+
+1. Click **+ Lane** in the marker panel. A new ruler lane should be created in REAPER (not just in the script).
+2. Right-click an existing ruler lane group → **Lane color** → choose Red/Green/etc. Check the same color in REAPER's Ruler Lane Manager. Check **Default** to clear the lane default color.
+3. Right-click a group → **Move lane up/down**. Check that the line order changes in REAPER and that marker GUIDs and exact positions remain unchanged.
+4. Rename or reorder a lane directly in REAPER. The group should follow its real lane GUID.
+5. Undo/Redo each operation with ReaTimeline Notes focused; check marker and lane consistency after every action.
+
+**Deletion is deliberately not available in G2.2.** REAPER can delete markers/regions alongside a lane depending on the deletion mode; deletion and migration rules require a separately tested G2.3 workflow.
+
+This is not a release build. Do not merge it into `main` until native tests pass.
