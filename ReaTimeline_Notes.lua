@@ -3780,10 +3780,12 @@ function UI.history_caption(direction)
 end
 function UI.history_item(direction,label_width)
   local base=direction<0 and 'Undo' or 'Redo'
-  local caption=UI.history_caption(direction)
+  local caption=(language=='ru' and 'Заметки: ' or 'Notes: ')..UI.history_caption(direction)
   local os_name=reaper.GetOS()
   local mac=os_name:match('OSX') or os_name:match('macOS')
-  local shortcut=mac and (direction<0 and '⌘Z' or '⇧⌘Z') or (direction<0 and 'Ctrl+Z' or 'Ctrl+Shift+Z')
+  local shortcut=history_target=='notes' and
+    (mac and (direction<0 and '⌘Z' or '⇧⌘Z') or
+      (direction<0 and 'Ctrl+Z' or 'Ctrl+Shift+Z')) or ''
   local space=math.max(1,(ImGui.CalcTextSize(ctx,' ')))
   local padding=math.max(UI_METRICS.history_shortcut_min_spaces,math.ceil((label_width-ImGui.CalcTextSize(ctx,caption)+UI_METRICS.history_shortcut_gap)/space))
   -- Keep the shortcut beside these rows: long unrelated menu labels must not
@@ -3806,7 +3808,9 @@ local function menu_bar()
       end
     end
     ImGui.Separator(ctx)
-    local history_width=math.max(ImGui.CalcTextSize(ctx,UI.history_caption(-1)),(ImGui.CalcTextSize(ctx,UI.history_caption(1))))
+    local history_width=math.max(ImGui.CalcTextSize(ctx,UI.history_caption(-1)),
+      ImGui.CalcTextSize(ctx,UI.history_caption(1)))+
+      ImGui.CalcTextSize(ctx,language=='ru' and 'Заметки: ' or 'Notes: ')
     if UI.history_item(-1,history_width) then history_request=-1 end
     if UI.history_item(1,history_width) then history_request=1 end
     ImGui.Separator(ctx)
